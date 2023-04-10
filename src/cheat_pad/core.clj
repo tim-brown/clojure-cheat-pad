@@ -1,38 +1,45 @@
 (ns cheat-pad.core
-  (:require [hiccup.core :refer :all]))
+  (:require
+    [hiccup.core :refer :all]
+    [ring.adapter.jetty :as jetty]
+    ))
 
-;; TODO: pomogranite for live reloading
+(declare render-expr)
 
-(defn blue  [x] [:cheat-quote [:span.blue x]])
-(defn red   [x] [:cheat-quote [:span.red x]])
-(defn green [x] [:cheat-quote [:span.green x]])
+(def output-file-name "output/cheatsheet.html")
+(def debug-file-name "output/rendered.html")
+
+(defn cheat-quote [x]
+  (if (instance? clojure.lang.IObj x)
+    (vary-meta x assoc :cheat-quoted? true)
+    x))
+
+(defn cheat-quoted? [x] (:cheat-quoted? (meta x)))
+
+(defn blue  [x] (cheat-quote [:span.blue x]))
+
+(defn red   [x] (cheat-quote [:span.red x]))
+
+(defn green [x] (cheat-quote [:span.green x]))
+
+(def illustrative-namespaces
+  #{(name (ns-name *ns*))
+    })
 
 (def fancy-renderings
-  (assoc {}
-         `clojure.core/inc [:span.special "inc"]
-         ))
+  {
+   `clojure.core/inc [:span.special "[inc]"]
+   })
 
-         ;`blue [:span.blue [:var "%"]]
-         ;`red [:span.red [:var "%"]]
-         ;`green [:span.green [:var "%"]]
-
-;; functions outside clojure.core should be considered carefully, since
+;; functions outside clojure.core should be used carefully, since
 ;; we're just going to render this as (f "%")
 (defn fancy [e]
   (cond
     (fancy-renderings e) (fancy-renderings e) 
-
-    (fn? e) (second (e "%"))
-
-    (and (symbol? e) (= (namespace e) "clojure.core")) [:span.command (name e)]
-
-    (symbol? e) e))
-
-(comment
-  (cheat-sheet)
-  )
-
-(declare render-expr)
+    (fn? e) (render-expr (e "%"))
+    (not (symbol? e)) nil
+    (= (namespace e) "clojure.core") [:span.command (name e)]
+    (illustrative-namespaces (namespace e)) (fancy @(resolve e))))
 
 (defn render-sequence [expr cls open close]
   (-> [:span {:class cls} open]
@@ -40,36 +47,29 @@
       (conj close)))
 
 (defn infinite-seq? [s & {:keys [infinity] :or {infinity 10}}]
-  (and (seq? s) (= infinity (count (take infinity s)))))
+  (and (sequential? s)
+       (= infinity (count (take infinity s)))))
 
-(fancy (juxt red blue))
-(fancy (comp red blue))
+(defn render-expr [expr & {:keys [infinity] :or {infinity 10}}]
+  (try
+    (cond
+      (fancy expr) (fancy expr)
 
-(defn render-expr [expr  & {:keys [infinity] :or {infinity 10}}]
-  (cond
-    (fancy expr) (fancy expr) 
-    (nil? expr) [:tt.nil "nil"]
-    (string? expr) [:tt.string "\"" expr "\""]
+      (nil? expr) [:tt.nil "nil"]
 
-    (and (vector? expr) (= :cheat-quote (first expr))) (second expr)
-    (vector? expr) (render-sequence expr "vector" "[" "]")
+      (string? expr) [:tt.string "\"" expr "\""]
 
-    (infinite-seq? expr :infinity infinity)
-    (render-sequence (take infinity expr) "sequence" "(" "...)")
+      (cheat-quoted? expr) expr
 
-    (seq? expr)
-    (render-sequence expr "sequence" "(" ")") 
+      (vector? expr) (render-sequence expr "vector" "[" "]")
 
-    :else [:tt #_{:class (type expr)} (str expr)]))
+      (infinite-seq? expr :infinity infinity) (render-sequence (take infinity expr) "sequence" "(" "...)")
 
-(defn cheat [expr]
-  (let [rendered-expression
-        [:tr
-         [:td (render-expr expr)]
-         [:td " "]
-         [:td (render-expr (eval expr))]]]
-    (spit "rendered.html" (html rendered-expression))
-    rendered-expression))
+      (sequential? expr) (render-sequence expr "sequence" "(" ")") 
+
+      :else [:tt {:class (.getSimpleName (type expr))} (str expr)])
+
+    (catch Exception e [:tt.exception (.getMessage e)])))
 
 (def style-sheet
   [:style
@@ -79,31 +79,114 @@
    ".green {padding: 2px; border-radius: 0.25em; border: 3px inset green;}"
    ".command {color: #000080; font-weight: bold}"
    ".special {color: blue; font-weight: bold}"
+   ".exception {color: #440000; backgroud-color: #ffaa88}"
    ".nil {color: red;}"
    ])
 
-(comment
-  (cheat-sheet)
-  )
+(defn html-or-die [& body]
+  (let [common-head [:head
+        style-sheet
+        [:meta {:http-equiv "refresh" :content "2"}]]]
+  (try
+    (html
+      [:html
+       common-head
+       [:body body]])
+    (catch Exception e
+      (html
+        [:html
+         common-head
+         [:body [:pre (.getMessage e)] [:pre (str body)]]])))))
+
+(defn cheat [expr]
+  (clojure.java.io/make-parents debug-file-name)
+  (let [e (eval expr)
+        rendered-expression
+        [:tr
+         [:td (render-expr expr)]
+         [:td (render-expr e)]
+         [:td.type (type e)]]]
+    (spit debug-file-name (html-or-die rendered-expression))
+    rendered-expression))
+
+(defn cheat-string [string]
+  (clojure.java.io/make-parents debug-file-name)
+  (let [
+        expr (eval (read-string string))
+        rendered-expression
+        [:tr
+         [:td [:code string]]
+         [:td (render-expr expr)]
+         [:td.type (type expr)]]]
+    (spit debug-file-name (html-or-die rendered-expression))
+    rendered-expression))
+
+(defn sec1 [& content] [:tr [:th {:colspan 3} content]])
+(defn sec2 [& content] [:tr [:th {:colspan 3} content]])
+(defn sec3 [& content] [:tr [:th {:colspan 3} content]])
+
+(defn gen-body []
+  (list
+    [:table
+     (sec1 "Primitives")
+     (sec2 "Numbers")
+     (sec3 "Literals")
+     (cheat-string "7")
+     (cheat-string "0xff")
+     (cheat-string "017")
+     (cheat-string "2r1011")
+     (cheat-string "36rCRAZY")
+     (cheat-string "7N")
+     (cheat-string "-22/7")
+     (cheat-string "2.78")
+     (cheat-string "-1.2e-5")
+     (cheat-string "4.2M")
+     (sec1 "Random Stuff")
+     (cheat `(true? 42))
+     (cheat `(true? true))
+     (cheat `(true? nil))
+     (cheat `(true? false))
+     (cheat `green)
+     (cheat `(juxt red blue))
+     (cheat `((juxt red blue) 42))
+     (cheat `((comp red blue) 42))
+     (cheat `(interpose "X" [1 2 3]))
+     (cheat `(mapv inc [1 2 3]))
+     (cheat `(map blue [1 2 3]))
+     (cheat `(repeat :hello))]))
 
 (defn cheat-sheet []
-  (spit "cheatsheet.html"
-        (html
-          [:html
-           [:head
-            style-sheet
-            [:meta {:http-equiv "refresh" :content "2"}]
-            ]
-           [:body
-            [:table
-             (cheat `(true? 42))
-             (cheat `(true? true))
-             (cheat `(true? nil))
-             (cheat `(true? false))
-             (cheat `(juxt red blue))
-             (cheat `((juxt red blue) 42))
-             (cheat `((comp red blue) 42))
-             (cheat `(interpose "X" [1 2 3]))
-             (cheat `(mapv inc [1 2 3]))
-             (cheat `(map blue [1 2 3]))
-             (cheat `(repeat :hello))]]])))
+  (clojure.java.io/make-parents output-file-name)
+  (let [content (html-or-die (gen-body))]
+    (spit output-file-name content)
+    content))
+
+(comment
+  (cheat-sheet)
+  (render-expr (juxt red))
+  (cheat `(juxt red))
+  (fancy `(juxt red))
+  (gen-body)
+  (list
+    (symbol? `green)
+    (fancy `green)
+    (resolve `green)
+    (illustrative-namespaces (namespace `green))
+    (illustrative-namespaces "cheat-pad.core")
+    (green 42))
+  (cheat-quote [:span.green 42])
+  ((juxt red green) 42)
+  (trace (render-expr ((juxt red green) 42)))
+  (render-expr ((comp red green) 42)))
+
+(defn handle-cheatsheet-request [rq]
+  {
+   :status 200
+   :headers {"Content-type" "text/html"}
+   :body (cheat-sheet)
+   })
+
+(defonce server (jetty/run-jetty #'handle-cheatsheet-request
+                                 {:port 3000
+                                  :join? false}))
+
